@@ -1,0 +1,76 @@
+name: Sync APK links and icons
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout my repository
+        uses: actions/checkout@v4
+
+      - name: Get official Keiyoushi repo
+        run: |
+          git clone --depth 1 --branch repo https://github.com/keiyoushi/extensions.git official-keiyoushi
+
+      - name: Update APK links and icons
+        run: |
+          python3 <<'PY'
+          import json, re, shutil
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          index_path = Path("index.min.json")
+          data = json.loads(index_path.read_text(encoding="utf-8"))
+
+          html = Path("official-keiyoushi/index.html").read_text(encoding="utf-8")
+          links = dict(re.findall(r'<a href="([^"]+/([^/"]+\.apk))">', html))
+          links = {filename: url for url, filename in links.items()}
+
+          changed = 0
+          missing = 0
+
+          for item in data:
+              apk = item.get("apk", "")
+              filename = Path(urlparse(apk).path).name or Path(apk).name
+
+              if filename in links:
+                  item["apk"] = links[filename]
+                  changed += 1
+              else:
+                  missing += 1
+
+          index_path.write_text(
+              json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8"
+          )
+
+          src = Path("official-keiyoushi/icon")
+          dst = Path("icon")
+
+          if dst.exists():
+              shutil.rmtree(dst)
+
+          shutil.copytree(src, dst)
+
+          print(f"Updated APK links: {changed}")
+          print(f"No current official APK link found: {missing}")
+          print(f"Icons copied: {len(list(dst.iterdir()))}")
+          PY
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.min.json icon
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Fix APK links and add extension icons"
+            git push
+          fi
