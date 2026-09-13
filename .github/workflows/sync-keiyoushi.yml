@@ -1,4 +1,4 @@
-name: Sync APK links and icons
+name: Sync Keiyoushi APK links and icons
 
 on:
   workflow_dispatch:
@@ -9,46 +9,99 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout my repository
         uses: actions/checkout@v4
 
-      - name: Get official Keiyoushi repo
+      - name: Get official Keiyoushi index
         run: |
-          git clone --depth 1 --branch repo https://github.com/keiyoushi/extensions.git official-keiyoushi
+          curl -L --fail \
+            https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.json \
+            -o official-index.json
 
-      - name: Update APK links and icons
+      - name: Get official Keiyoushi icons
+        run: |
+          git clone --depth 1 --branch repo \
+            https://github.com/keiyoushi/extensions.git official-keiyoushi
+
+      - name: Fix APK links and sources
         run: |
           python3 <<'PY'
-          import json, re, shutil
+          import json
+          import shutil
           from pathlib import Path
           from urllib.parse import urlparse
 
           index_path = Path("index.min.json")
-          data = json.loads(index_path.read_text(encoding="utf-8"))
+          official_path = Path("official-index.json")
 
-          html = Path("official-keiyoushi/index.html").read_text(encoding="utf-8")
-          links = dict(re.findall(r'<a href="([^"]+/([^/"]+\.apk))">', html))
-          links = {filename: url for url, filename in links.items()}
+          data = json.loads(index_path.read_text(encoding="utf-8"))
+          official = json.loads(official_path.read_text(encoding="utf-8"))
+
+          official_extensions = official["extensionList"]["extensions"]
+
+          # Build exact filename -> official GitHub Release URL
+          apk_links = {}
+
+          # Also build package/version -> official data
+          package_data = {}
+
+          for ext in official_extensions:
+              resources = ext.get("resources", {})
+              apk_url = resources.get("apkUrl", "")
+
+              if not apk_url:
+                  continue
+
+              filename = Path(urlparse(apk_url).path).name
+
+              if filename.endswith(".apk"):
+                  apk_links[filename] = apk_url
+
+              key = (
+                  ext.get("packageName", ""),
+                  str(ext.get("versionName", ""))
+              )
+
+              package_data[key] = ext
 
           changed = 0
-          missing = 0
+          matched = 0
+          missing = []
 
           for item in data:
-              apk = item.get("apk", "")
-              filename = Path(urlparse(apk).path).name or Path(apk).name
+              old_apk = item.get("apk", "")
+              filename = Path(urlparse(old_apk).path).name
 
-              if filename in links:
-                  item["apk"] = links[filename]
+              if filename in apk_links:
+                  item["apk"] = apk_links[filename]
+                  matched += 1
                   changed += 1
               else:
-                  missing += 1
+                  missing.append(filename)
 
           index_path.write_text(
-              json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+              json.dumps(
+                  data,
+                  ensure_ascii=False,
+                  separators=(",", ":")
+              ),
               encoding="utf-8"
           )
 
+          print("===================================")
+          print(f"Total entries: {len(data)}")
+          print(f"APK links fixed: {changed}")
+          print(f"Missing official APKs: {len(missing)}")
+          print("===================================")
+
+          if missing:
+              print("Missing filenames:")
+              for filename in missing:
+                  print(filename)
+
+          # Copy official icons
           src = Path("official-keiyoushi/icon")
           dst = Path("icon")
 
@@ -57,20 +110,19 @@ jobs:
 
           shutil.copytree(src, dst)
 
-          print(f"Updated APK links: {changed}")
-          print(f"No current official APK link found: {missing}")
           print(f"Icons copied: {len(list(dst.iterdir()))}")
           PY
 
-      - name: Commit changes
+      - name: Commit corrected index
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add index.min.json icon
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Fix APK links and add extension icons"
+            git commit -m "Fix APK links using official Keiyoushi releases"
             git push
           fi
