@@ -1,4 +1,4 @@
-name: Sync Keiyoushi APK links and icons
+name: Sync Keiyoushi Extensions
 
 on:
   workflow_dispatch:
@@ -11,21 +11,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout my repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get official Keiyoushi index
+      - name: Download official Keiyoushi index
         run: |
           curl -L --fail \
             https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.json \
             -o official-index.json
 
-      - name: Get official Keiyoushi icons
+      - name: Download official icons
         run: |
           git clone --depth 1 --branch repo \
             https://github.com/keiyoushi/extensions.git official-keiyoushi
 
-      - name: Fix APK links and sources
+      - name: Build compatible index.min.json
         run: |
           python3 <<'PY'
           import json
@@ -33,87 +33,128 @@ jobs:
           from pathlib import Path
           from urllib.parse import urlparse
 
-          index_path = Path("index.min.json")
-          official_path = Path("official-index.json")
+          OLD_INDEX = Path("index.min.json")
+          OFFICIAL_INDEX = Path("official-index.json")
 
-          data = json.loads(index_path.read_text(encoding="utf-8"))
-          official = json.loads(official_path.read_text(encoding="utf-8"))
+          old_data = json.loads(
+              OLD_INDEX.read_text(encoding="utf-8")
+          )
 
-          official_extensions = official["extensionList"]["extensions"]
+          official_data = json.loads(
+              OFFICIAL_INDEX.read_text(encoding="utf-8")
+          )
 
-          # Build exact filename -> official GitHub Release URL
-          apk_links = {}
+          official_extensions = official_data["extensionList"]["extensions"]
 
-          # Also build package/version -> official data
-          package_data = {}
+          # Match official extensions by package name.
+          official_by_package = {}
 
           for ext in official_extensions:
-              resources = ext.get("resources", {})
-              apk_url = resources.get("apkUrl", "")
+              package = ext.get("packageName")
 
-              if not apk_url:
+              if package:
+                  official_by_package[package] = ext
+
+          updated = 0
+          sources_updated = 0
+          missing = 0
+
+          for item in old_data:
+
+              package = item.get("pkg", "")
+              official = official_by_package.get(package)
+
+              if not official:
+                  missing += 1
                   continue
 
-              filename = Path(urlparse(apk_url).path).name
+              resources = official.get("resources", {})
 
-              if filename.endswith(".apk"):
-                  apk_links[filename] = apk_url
+              # -------------------------------------------------
+              # Official APK URL
+              # -------------------------------------------------
 
-              key = (
-                  ext.get("packageName", ""),
-                  str(ext.get("versionName", ""))
-              )
+              apk_url = resources.get("apkUrl", "")
 
-              package_data[key] = ext
+              if apk_url:
+                  item["apk"] = apk_url
+                  updated += 1
 
-          changed = 0
-          matched = 0
-          missing = []
+              # -------------------------------------------------
+              # Official sources
+              # Convert current Keiyoushi format to the older
+              # index.min.json format used by this repository.
+              # -------------------------------------------------
 
-          for item in data:
-              old_apk = item.get("apk", "")
-              filename = Path(urlparse(old_apk).path).name
+              official_sources = official.get("sources", [])
 
-              if filename in apk_links:
-                  item["apk"] = apk_links[filename]
-                  matched += 1
-                  changed += 1
-              else:
-                  missing.append(filename)
+              converted_sources = []
 
-          index_path.write_text(
+              for source in official_sources:
+
+                  source_item = {
+                      "name": source.get("name", ""),
+                      "lang": source.get("language", ""),
+                      "id": str(source.get("id", "")),
+                      "baseUrl": source.get("homeUrl", "")
+                  }
+
+                  # Keep mirror URLs when available.
+                  if source.get("mirrorUrls"):
+                      source_item["baseUrl"] = source["mirrorUrls"][0]
+
+                  converted_sources.append(source_item)
+
+              if converted_sources:
+                  item["sources"] = converted_sources
+                  sources_updated += 1
+
+          # -----------------------------------------------------
+          # Save minified JSON
+          # -----------------------------------------------------
+
+          OLD_INDEX.write_text(
               json.dumps(
-                  data,
+                  old_data,
                   ensure_ascii=False,
                   separators=(",", ":")
               ),
               encoding="utf-8"
           )
 
-          print("===================================")
-          print(f"Total entries: {len(data)}")
-          print(f"APK links fixed: {changed}")
-          print(f"Missing official APKs: {len(missing)}")
-          print("===================================")
+          print("========================================")
+          print("Keiyoushi synchronization completed")
+          print("========================================")
+          print(f"Total old extensions : {len(old_data)}")
+          print(f"APK links updated    : {updated}")
+          print(f"Sources updated      : {sources_updated}")
+          print(f"Not found officially : {missing}")
+          print("========================================")
 
-          if missing:
-              print("Missing filenames:")
-              for filename in missing:
-                  print(filename)
-
+          # -----------------------------------------------------
           # Copy official icons
-          src = Path("official-keiyoushi/icon")
-          dst = Path("icon")
+          # -----------------------------------------------------
 
-          if dst.exists():
-              shutil.rmtree(dst)
+          source_icons = Path("official-keiyoushi/icon")
+          destination_icons = Path("icon")
 
-          shutil.copytree(src, dst)
+          if destination_icons.exists():
+              shutil.rmtree(destination_icons)
 
-          print(f"Icons copied: {len(list(dst.iterdir()))}")
+          shutil.copytree(
+              source_icons,
+              destination_icons
+          )
+
+          icon_count = len(
+              list(destination_icons.iterdir())
+          )
+
+          print(f"Icons copied         : {icon_count}")
+
           PY
 
-      - name: Commit corrected index
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -123,6 +164,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Fix APK links using official Keiyoushi releases"
+            git commit -m "Sync Keiyoushi extensions"
             git push
           fi
